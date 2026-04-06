@@ -6,3 +6,6 @@ requests
 python-dotenv
 pytest
 pytest-json-report
+pdfplumber
+python-docx
+openpyxl
