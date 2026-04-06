@@ -1,0 +1,8 @@
+groq
+selenium
+webdriver-manager
+jira
+requests
+python-dotenv
+pytest
+pytest-json-report

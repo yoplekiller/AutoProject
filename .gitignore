@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+reports/
+.playwright/
+credentials.json
+*.xlsx
+desktop.ini
