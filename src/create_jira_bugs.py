@@ -44,13 +44,19 @@ if not failed_tests:
 
 print(f"[실패 항목 {len(failed_tests)}건 -> Jira 버그 티켓 생성]\n")
 
-# 기존 자동버그 티켓 조회 (중복 방지)
+# 기존 자동버그 티켓 조회 (중복 방지) - issue_key 기준
 existing = jira.search_issues(
-    f'project={PROJECT_KEY} AND issuetype=Bug AND summary ~ "[자동버그]"',
-    maxResults=100
+    f'project={PROJECT_KEY} AND issuetype=Bug AND summary ~ "[자동버그]" AND statusCategory != Done',
+    maxResults=200
 )
-existing_summaries = {issue.fields.summary for issue in existing}
-print(f"기존 버그 티켓 {len(existing_summaries)}건 확인 (중복 스킵)\n")
+# "[자동버그] MKQA-1" 형태로 issue_key만 추출
+existing_keys = set()
+for issue in existing:
+    parts = issue.fields.summary.split("]")
+    if len(parts) > 1:
+        key = parts[1].strip().split(" ")[0]  # e.g. "MKQA-1"
+        existing_keys.add(key)
+print(f"기존 버그 티켓 {len(existing_keys)}건 확인 (중복 스킵)\n")
 
 created = []
 skipped = []
@@ -73,8 +79,8 @@ for t in failed_tests:
 
     summary = f"[자동버그] {issue_key} / {test_func} - {outcome}"
 
-    # 중복 체크
-    if summary in existing_summaries:
+    # 중복 체크 (issue_key 기준)
+    if issue_key in existing_keys:
         print(f"  [SKIP] 이미 존재: {summary}")
         skipped.append(summary)
         continue
