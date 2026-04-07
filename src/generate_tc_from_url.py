@@ -188,8 +188,8 @@ def save_excel(results: list, output_path: str):
     center_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
     top_align = Alignment(vertical="top", wrap_text=True)
 
-    headers = ["티켓 키", "요약", "상태", "우선순위", "TC ID", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과"]
-    col_widths = [12, 28, 12, 10, 10, 28, 28, 45, 35]
+    headers = ["TC ID", "티켓 키", "요약", "상태", "우선순위", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과"]
+    col_widths = [10, 14, 28, 12, 10, 28, 28, 45, 35]
 
     for col, (header, width) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=col, value=header)
@@ -203,11 +203,14 @@ def save_excel(results: list, output_path: str):
     row = 2
     for item in results:
         for tc in item["test_cases"]:
-            ws.cell(row=row, column=1, value=item["key"]).alignment = center_align
-            ws.cell(row=row, column=2, value=item["summary"]).alignment = top_align
-            ws.cell(row=row, column=3, value=item["status"]).alignment = center_align
-            ws.cell(row=row, column=4, value=tc.get("우선순위", "")).alignment = center_align
-            ws.cell(row=row, column=5, value=tc.get("tc_id", "")).alignment = center_align
+            ws.cell(row=row, column=1, value=tc.get("tc_id", "")).alignment = center_align
+            key_cell = ws.cell(row=row, column=2, value=item["key"])
+            key_cell.hyperlink = f"{JIRA_URL}/browse/{item['key']}"
+            key_cell.font = Font(color="0563C1", underline="single")
+            key_cell.alignment = center_align
+            ws.cell(row=row, column=3, value=item["summary"]).alignment = top_align
+            ws.cell(row=row, column=4, value=item["status"]).alignment = center_align
+            ws.cell(row=row, column=5, value=tc.get("우선순위", "")).alignment = center_align
             ws.cell(row=row, column=6, value=tc.get("테스트항목", "")).alignment = top_align
             ws.cell(row=row, column=7, value=tc.get("사전조건", "")).alignment = top_align
             ws.cell(row=row, column=8, value=tc.get("테스트단계", "")).alignment = top_align

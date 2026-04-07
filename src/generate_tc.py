@@ -107,8 +107,8 @@ header_font = Font(bold=True, color="FFFFFF")
 header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
 header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-headers = ["티켓 키", "요약", "상태", "TC ID", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과"]
-col_widths = [12, 25, 12, 10, 25, 25, 40, 30]
+headers = ["TC ID", "티켓 키", "요약", "상태", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과"]
+col_widths = [10, 14, 25, 12, 25, 25, 40, 30]
 
 for col, (header, width) in enumerate(zip(headers, col_widths), start=1):
     cell = ws.cell(row=1, column=col, value=header)
@@ -123,10 +123,12 @@ ws.row_dimensions[1].height = 25
 row = 2
 for item in results:
     for tc in item["test_cases"]:
-        ws.cell(row=row, column=1, value=item["issue_key"])
-        ws.cell(row=row, column=2, value=item["summary"])
-        ws.cell(row=row, column=3, value=item["status"])
-        ws.cell(row=row, column=4, value=tc.get("tc_id", ""))
+        ws.cell(row=row, column=1, value=tc.get("tc_id", ""))
+        key_cell = ws.cell(row=row, column=2, value=item["issue_key"])
+        key_cell.hyperlink = f"{os.getenv('JIRA_URL')}/browse/{item['issue_key']}"
+        key_cell.font = Font(color="0563C1", underline="single")
+        ws.cell(row=row, column=3, value=item["summary"])
+        ws.cell(row=row, column=4, value=item["status"])
         ws.cell(row=row, column=5, value=tc.get("테스트항목", ""))
         ws.cell(row=row, column=6, value=tc.get("사전조건", ""))
         steps_cell = ws.cell(row=row, column=7, value=tc.get("테스트단계", ""))

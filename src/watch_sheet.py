@@ -39,7 +39,7 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
 INPUT_SHEET_NAME = "티켓 입력"
-OUTPUT_SHEET_NAME = "매뉴얼 TC"
+OUTPUT_SHEET_NAME = "매뉴얼 TC"  # 사용 안 함 (티켓별 시트로 분리)
 
 
 # ── gspread 클라이언트 ────────────────────────────────────────────────
@@ -156,6 +156,7 @@ def generate_test_cases(groq_client: Groq, issue: dict) -> list:
   {{
     "tc_id": "TC-001",
     "테스트항목": "",
+    "테스트환경": "Web / Mobile / API 중 해당하는 것",
     "사전조건": "",
     "테스트단계": "1. 단계1\\n2. 단계2\\n3. 단계3",
     "기대결과": "",
@@ -179,51 +180,81 @@ def generate_test_cases(groq_client: Groq, issue: dict) -> list:
 
 # ── 구글 시트 결과 저장 (append) ──────────────────────────────────────
 
-def ensure_output_header(ws_output):
-    """'매뉴얼 TC' 시트 헤더가 없으면 추가."""
-    headers = ["티켓 키", "요약", "상태", "우선순위", "TC ID", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "생성 시각"]
-    existing = ws_output.row_values(1)
-    if not existing or existing[0] != "티켓 키":
-        ws_output.insert_row(headers, index=1)
-        ws_output.format("A1:J1", {
-            "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
-            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-            "horizontalAlignment": "CENTER",
-        })
-        print(f"  '{OUTPUT_SHEET_NAME}' 헤더 추가")
+def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
+    """티켓 키 이름으로 시트를 생성(또는 초기화)하고 TC를 기입."""
+    import gspread
 
-
-def append_tc_rows(ws_output, issue: dict, tc_list: list, generated_at: str):
-    """TC 결과를 '매뉴얼 TC' 시트에 append."""
+    sheet_title = issue["key"]  # e.g. "MKQA-1"
+    headers = ["TC ID", "테스트 항목", "테스트 환경", "사전 조건", "테스트 단계", "기대 결과", "실제 결과", "Pass/Fail", "우선순위", "비고"]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
         "Low":    {"red": 0.85, "green": 0.92, "blue": 0.85},
     }
 
+    # 시트 생성 또는 초기화
+    try:
+        ws = sh.worksheet(sheet_title)
+        ws.clear()
+        print(f"  '{sheet_title}' 시트 초기화")
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=sheet_title, rows=200, cols=10)
+        print(f"  '{sheet_title}' 시트 생성")
+
+    # 1행: 티켓 정보 요약
+    ws.update(
+        [[f"{issue['key']} | {issue['summary']} | 상태: {issue['status']} | 생성: {generated_at}"]],
+        "A1"
+    )
+    ws.format("A1", {
+        "backgroundColor": {"red": 0.204, "green": 0.659, "blue": 0.325},
+        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+    })
+    ws.merge_cells("A1:J1")
+
+    # 2행: 헤더
+    ws.update([headers], "A2")
+    ws.format("A2:J2", {
+        "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
+        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        "horizontalAlignment": "CENTER",
+    })
+
+    # 3행~: TC 데이터
     rows_to_add = []
     for tc in tc_list:
         rows_to_add.append([
-            issue["key"],
-            issue["summary"],
-            issue["status"],
-            tc.get("우선순위", ""),
             tc.get("tc_id", ""),
             tc.get("테스트항목", ""),
+            tc.get("테스트환경", ""),
             tc.get("사전조건", ""),
             tc.get("테스트단계", ""),
             tc.get("기대결과", ""),
-            generated_at,
+            "",   # 실제 결과 - 테스터가 직접 입력
+            "",   # Pass/Fail - 테스터가 직접 입력
+            tc.get("우선순위", ""),
+            "",   # 비고 - 테스터가 직접 입력
         ])
 
-    ws_output.append_rows(rows_to_add, value_input_option="RAW")
+    if rows_to_add:
+        ws.update(rows_to_add, "A3")
 
-    # 우선순위 색상 적용
-    start_row = len(ws_output.col_values(1)) - len(tc_list) + 1
-    for i, tc in enumerate(tc_list):
-        color = priority_colors.get(tc.get("우선순위", ""))
-        if color:
-            ws_output.format(f"D{start_row + i}", {"backgroundColor": color})
+        # 우선순위 색상 (I열)
+        for i, tc in enumerate(tc_list):
+            color = priority_colors.get(tc.get("우선순위", ""))
+            if color:
+                ws.format(f"I{3 + i}", {"backgroundColor": color})
+
+    # 열 너비 설정
+    col_widths = [80, 200, 120, 180, 280, 220, 150, 90, 90, 120]
+    requests_body = [{"updateDimensionProperties": {
+        "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
+        "properties": {"pixelSize": px},
+        "fields": "pixelSize",
+    }} for i, px in enumerate(col_widths)]
+    sh.batch_update({"requests": requests_body})
+
+    print(f"  '{sheet_title}' 시트에 TC {len(tc_list)}개 저장 완료")
 
 
 def mark_row_done(ws_input, row_idx: int, timestamp: str):
@@ -289,10 +320,6 @@ def main():
         })
         print(f"  '{INPUT_SHEET_NAME}' 헤더 추가 완료")
 
-    # 출력 시트 확인
-    ws_output = get_or_create_worksheet(sh, OUTPUT_SHEET_NAME)
-    ensure_output_header(ws_output)
-
     # 미처리 행 스캔
     pending = scan_pending_rows(ws_input)
 
@@ -345,8 +372,8 @@ def main():
         for tc in tc_list:
             print(f"    [{tc.get('tc_id')}] [{tc.get('우선순위', '-')}] {tc.get('테스트항목')}")
 
-        # 결과 시트에 append
-        append_tc_rows(ws_output, issue, tc_list, timestamp)
+        # 티켓별 시트에 저장
+        create_ticket_sheet(sh, issue, tc_list, timestamp)
 
         # 입력 시트 상태 업데이트
         mark_row_done(ws_input, row_idx, timestamp)
