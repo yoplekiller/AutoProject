@@ -9,3 +9,5 @@ pytest-json-report
 pdfplumber
 python-docx
 openpyxl
+gspread
+google-auth
