@@ -184,7 +184,9 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     """티켓 키 이름으로 시트를 생성(또는 초기화)하고 TC를 기입."""
     import gspread
 
-    sheet_title = issue["key"]  # e.g. "MKQA-1"
+    # 시트 이름: "MKQA-1 (요약)" 형식, 구글 시트 탭 이름 최대 100자 제한
+    summary_short = issue["summary"][:40] if len(issue["summary"]) > 40 else issue["summary"]
+    sheet_title = f"{issue['key']} ({summary_short})"
     headers = ["TC ID", "테스트 항목", "테스트 환경", "사전 조건", "테스트 단계", "기대 결과", "실제 결과", "Pass/Fail", "우선순위", "비고"]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
