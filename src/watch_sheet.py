@@ -127,40 +127,92 @@ def fetch_issue(jira: JIRA, issue_key: str) -> dict:
 
 # ── Groq TC 생성 ─────────────────────────────────────────────────────
 
-def generate_test_cases(groq_client: Groq, issue: dict) -> list:
+def augment_ticket_spec(groq_client: Groq, issue: dict) -> str:
+    """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다."""
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "당신은 경력 있는 QA 엔지니어입니다. "
-                    "Jira 티켓 정보를 바탕으로 매뉴얼 테스트 케이스를 작성합니다. "
-                    "정상 흐름(Happy Path), 예외 처리, 경계값 등을 고려하여 작성하세요."
+                    "당신은 시니어 QA 엔지니어입니다. "
+                    "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
+                    "한국어로 작성하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"""아래 Jira 티켓 정보를 보고 테스트 관점의 요구사항을 추론해주세요.
+
+티켓 유형: {issue['issue_type']}
+티켓 제목: {issue['summary']}
+티켓 설명: {issue['description']}
+
+다음 항목을 간결하게 작성하세요:
+1. 기능 목적
+2. 주요 기능 요구사항 (3~5개)
+3. 예외/비정상 케이스 (2~3개)
+4. 보안·권한 고려사항 (해당 시)
+
+설명 없이 위 형식만 출력하세요.""",
+            },
+        ],
+    )
+    return response.choices[0].message.content.strip()
+
+
+def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str) -> list:
+    type_hint = {
+        "Bug":   "재현 시나리오, 수정 확인, 회귀 테스트 위주로 작성하세요.",
+        "Story": "Happy Path, 예외 처리, 경계값 테스트를 골고루 작성하세요.",
+        "Task":  "기능 동작 확인 및 예외 케이스 위주로 작성하세요.",
+        "Epic":  "주요 흐름과 통합 테스트 관점으로 작성하세요.",
+    }.get(issue["issue_type"], "기능 검증, 예외 처리, 경계값을 고려하여 작성하세요.")
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 경력 5년 이상의 QA 엔지니어입니다. "
+                    "실무 수준의 매뉴얼 테스트 케이스를 작성합니다. "
+                    "테스트 단계는 테스터가 그대로 따라할 수 있을 만큼 구체적으로 작성하세요."
                 ),
             },
             {
                 "role": "user",
                 "content": f"""다음 Jira 티켓에 대한 매뉴얼 테스트 케이스를 작성해주세요.
 
+[티켓 정보]
 티켓 키: {issue['key']}
 티켓 유형: {issue['issue_type']}
 티켓 제목: {issue['summary']}
 
-티켓 설명:
+[티켓 설명]
 {issue['description']}
 
-반드시 아래 JSON 배열 형식으로만 응답하세요. 설명이나 마크다운 코드블록 없이 JSON만 출력하세요.
+[추론된 요구사항]
+{augmented_spec}
+
+[작성 지침]
+- {type_hint}
+- 테스트유형: 기능 / 예외처리 / 경계값 / 회귀 / 보안 중 적절한 것 선택
+- 사전조건은 테스트 실행 전 필요한 상태를 명시 (예: 로그인 상태, 특정 데이터 존재 등)
+- 테스트 단계는 번호 매겨서 UI 기준으로 구체적으로 작성
+- 기대결과는 눈으로 확인 가능한 수준으로 작성하며 반드시 "~됨" 으로 끝낼 것 (예: "로그인 페이지로 이동됨", "에러 메시지가 표시됨")
+
+반드시 아래 JSON 배열 형식으로만 응답하세요. 마크다운 없이 JSON만 출력하세요.
 
 [
   {{
     "tc_id": "TC-001",
+    "테스트유형": "기능",
     "테스트항목": "",
-    "테스트환경": "Web / Mobile / API 중 해당하는 것",
     "사전조건": "",
     "테스트단계": "1. 단계1\\n2. 단계2\\n3. 단계3",
     "기대결과": "",
-    "우선순위": "High/Medium/Low"
+    "우선순위": "High"
   }}
 ]""",
             },
@@ -175,7 +227,7 @@ def generate_test_cases(groq_client: Groq, issue: dict) -> list:
         return json.loads(raw)
     except json.JSONDecodeError:
         print(f"  [경고] JSON 파싱 실패")
-        return [{"tc_id": "TC-ERROR", "테스트항목": raw, "사전조건": "", "테스트단계": "", "기대결과": "", "우선순위": ""}]
+        return [{"tc_id": "TC-ERROR", "테스트유형": "", "테스트항목": raw, "사전조건": "", "테스트단계": "", "기대결과": "", "우선순위": ""}]
 
 
 # ── 구글 시트 결과 저장 (append) ──────────────────────────────────────
@@ -184,10 +236,8 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     """티켓 키 이름으로 시트를 생성(또는 초기화)하고 TC를 기입."""
     import gspread
 
-    # 시트 이름: "MKQA-1 (요약)" 형식, 구글 시트 탭 이름 최대 100자 제한
-    summary_short = issue["summary"][:40] if len(issue["summary"]) > 40 else issue["summary"]
-    sheet_title = f"{issue['key']} ({summary_short})"
-    headers = ["TC ID", "테스트 항목", "테스트 환경", "사전 조건", "테스트 단계", "기대 결과", "실제 결과", "Pass/Fail", "우선순위", "비고"]
+    sheet_title = issue["summary"][:100]  # 시트 이름 = 티켓 제목
+    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과(P/F/N/A)", "우선순위", "비고"]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
@@ -200,23 +250,25 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
         ws.clear()
         print(f"  '{sheet_title}' 시트 초기화")
     except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_title, rows=200, cols=10)
+        ws = sh.add_worksheet(title=sheet_title, rows=200, cols=7)
         print(f"  '{sheet_title}' 시트 생성")
 
-    # 1행: 티켓 정보 요약
+    # 행 1: 티켓 URL 정보
+    ticket_url = f"{JIRA_URL}/browse/{issue['key']}"
     ws.update(
-        [[f"{issue['key']} | {issue['summary']} | 상태: {issue['status']} | 생성: {generated_at}"]],
+        [[f"{issue['key']}  |  {issue['summary']}  |  {ticket_url}  |  생성: {generated_at}"]],
         "A1"
     )
     ws.format("A1", {
-        "backgroundColor": {"red": 0.204, "green": 0.659, "blue": 0.325},
-        "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        "backgroundColor": {"red": 0.922, "green": 0.953, "blue": 0.984},
+        "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
+        "horizontalAlignment": "LEFT",
     })
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:I1")
 
     # 2행: 헤더
     ws.update([headers], "A2")
-    ws.format("A2:J2", {
+    ws.format("A2:I2", {
         "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
         "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
         "horizontalAlignment": "CENTER",
@@ -227,28 +279,53 @@ def create_ticket_sheet(sh, issue: dict, tc_list: list, generated_at: str):
     for tc in tc_list:
         rows_to_add.append([
             tc.get("tc_id", ""),
+            tc.get("테스트유형", ""),
             tc.get("테스트항목", ""),
-            tc.get("테스트환경", ""),
             tc.get("사전조건", ""),
             tc.get("테스트단계", ""),
             tc.get("기대결과", ""),
-            "",   # 실제 결과 - 테스터가 직접 입력
-            "",   # Pass/Fail - 테스터가 직접 입력
+            "",                      # 결과(P/F/N/A) - 테스터 입력
             tc.get("우선순위", ""),
-            "",   # 비고 - 테스터가 직접 입력
+            "",                      # 비고 - 테스터 입력
         ])
 
     if rows_to_add:
         ws.update(rows_to_add, "A3")
 
-        # 우선순위 색상 (I열)
+        # 우선순위 색상 (H열)
         for i, tc in enumerate(tc_list):
             color = priority_colors.get(tc.get("우선순위", ""))
             if color:
-                ws.format(f"I{3 + i}", {"backgroundColor": color})
+                ws.format(f"H{3 + i}", {"backgroundColor": color})
+
+        # 결과(P/F/N/A) 드롭다운 (G열, 0-indexed: col 6)
+        end_row = 3 + len(rows_to_add)
+        sh.batch_update({"requests": [{
+            "setDataValidation": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 2,
+                    "endRowIndex": end_row,
+                    "startColumnIndex": 6,
+                    "endColumnIndex": 7,
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": "P"},
+                            {"userEnteredValue": "F"},
+                            {"userEnteredValue": "N/A"},
+                        ],
+                    },
+                    "showCustomUi": True,
+                    "strict": False,
+                },
+            }
+        }]})
 
     # 열 너비 설정
-    col_widths = [80, 200, 120, 180, 280, 220, 150, 90, 90, 120]
+    col_widths = [90, 110, 200, 180, 280, 220, 100, 90, 150]
     requests_body = [{"updateDimensionProperties": {
         "range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
         "properties": {"pixelSize": px},
@@ -368,11 +445,13 @@ def main():
         print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
 
         # TC 생성
+        print(f"  요구사항 추론 중...")
+        augmented_spec = augment_ticket_spec(groq_client, issue)
         print(f"  TC 생성 중...")
-        tc_list = generate_test_cases(groq_client, issue)
+        tc_list = generate_test_cases(groq_client, issue, augmented_spec)
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:
-            print(f"    [{tc.get('tc_id')}] [{tc.get('우선순위', '-')}] {tc.get('테스트항목')}")
+            print(f"    [{tc.get('tc_id')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트항목')}")
 
         # 티켓별 시트에 저장
         create_ticket_sheet(sh, issue, tc_list, timestamp)

@@ -24,6 +24,7 @@ from datetime import datetime
 
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.worksheet.datavalidation import DataValidation
 from jira import JIRA
 from groq import Groq
 from dotenv import load_dotenv
@@ -69,40 +70,93 @@ def fetch_issue(jira: JIRA, issue_key: str) -> dict:
 
 # ── Groq ─────────────────────────────────────────────────────────────
 
-def generate_test_cases(groq_client: Groq, issue: dict) -> list:
-    """Groq API를 사용해 테스트 케이스를 생성합니다."""
+def augment_ticket_spec(groq_client: Groq, issue: dict) -> str:
+    """부실한 티켓 설명을 AI로 보완해 테스트 관점 요구사항을 추론합니다."""
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "당신은 경력 있는 QA 엔지니어입니다. "
-                    "Jira 티켓 정보를 바탕으로 매뉴얼 테스트 케이스를 작성합니다. "
-                    "정상 흐름(Happy Path), 예외 처리, 경계값 등을 고려하여 작성하세요."
+                    "당신은 시니어 QA 엔지니어입니다. "
+                    "Jira 티켓 정보가 부족할 때 도메인 지식으로 테스트 관점의 요구사항을 추론합니다. "
+                    "한국어로 작성하세요."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"""아래 Jira 티켓 정보를 보고 테스트 관점의 요구사항을 추론해주세요.
+
+티켓 유형: {issue['issue_type']}
+티켓 제목: {issue['summary']}
+티켓 설명: {issue['description']}
+
+다음 항목을 간결하게 작성하세요:
+1. 기능 목적
+2. 주요 기능 요구사항 (3~5개)
+3. 예외/비정상 케이스 (2~3개)
+4. 보안·권한 고려사항 (해당 시)
+
+설명 없이 위 형식만 출력하세요.""",
+            },
+        ],
+    )
+    return response.choices[0].message.content.strip()
+
+
+def generate_test_cases(groq_client: Groq, issue: dict, augmented_spec: str) -> list:
+    """Groq API를 사용해 테스트 케이스를 생성합니다."""
+    type_hint = {
+        "Bug":   "재현 시나리오, 수정 확인, 회귀 테스트 위주로 작성하세요.",
+        "Story": "Happy Path, 예외 처리, 경계값 테스트를 골고루 작성하세요.",
+        "Task":  "기능 동작 확인 및 예외 케이스 위주로 작성하세요.",
+        "Epic":  "주요 흐름과 통합 테스트 관점으로 작성하세요.",
+    }.get(issue["issue_type"], "기능 검증, 예외 처리, 경계값을 고려하여 작성하세요.")
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "당신은 경력 5년 이상의 QA 엔지니어입니다. "
+                    "실무 수준의 매뉴얼 테스트 케이스를 작성합니다. "
+                    "테스트 단계는 테스터가 그대로 따라할 수 있을 만큼 구체적으로 작성하세요."
                 ),
             },
             {
                 "role": "user",
                 "content": f"""다음 Jira 티켓에 대한 매뉴얼 테스트 케이스를 작성해주세요.
 
+[티켓 정보]
 티켓 키: {issue['key']}
 티켓 유형: {issue['issue_type']}
 티켓 제목: {issue['summary']}
 
-티켓 설명:
+[티켓 설명]
 {issue['description']}
 
-반드시 아래 JSON 배열 형식으로만 응답하세요. 설명이나 마크다운 코드블록 없이 JSON만 출력하세요.
+[추론된 요구사항]
+{augmented_spec}
+
+[작성 지침]
+- {type_hint}
+- 테스트유형: 기능 / 예외처리 / 경계값 / 회귀 / 보안 중 적절한 것 선택
+- 사전조건은 테스트 실행 전 필요한 상태를 명시 (예: 로그인 상태, 특정 데이터 존재 등)
+- 테스트 단계는 번호 매겨서 UI 기준으로 구체적으로 작성
+- 기대결과는 눈으로 확인 가능한 수준으로 작성하며 반드시 "~됨" 으로 끝낼 것 (예: "로그인 페이지로 이동됨", "에러 메시지가 표시됨")
+
+반드시 아래 JSON 배열 형식으로만 응답하세요. 마크다운 없이 JSON만 출력하세요.
 
 [
   {{
     "tc_id": "TC-001",
+    "테스트유형": "기능",
     "테스트항목": "",
     "사전조건": "",
     "테스트단계": "1. 단계1\\n2. 단계2\\n3. 단계3",
     "기대결과": "",
-    "우선순위": "High/Medium/Low"
+    "우선순위": "High"
   }}
 ]""",
             },
@@ -120,6 +174,7 @@ def generate_test_cases(groq_client: Groq, issue: dict) -> list:
         return [
             {
                 "tc_id": "TC-ERROR",
+                "테스트유형": "",
                 "테스트항목": raw,
                 "사전조건": "",
                 "테스트단계": "",
@@ -177,46 +232,62 @@ def read_keys_from_excel(file_path: str) -> list:
 
 
 def save_excel(results: list, output_path: str):
-    """결과를 엑셀 파일로 저장합니다."""
+    """결과를 엑셀 파일로 저장합니다. 티켓마다 별도 시트 생성."""
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "테스트케이스"
+    wb.remove(wb.active)  # 기본 빈 시트 제거
 
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과(P/F/N/A)", "우선순위", "비고"]
+    col_widths = [12, 12, 30, 28, 45, 35, 14, 10, 20]
+    last_col_letter = chr(64 + len(headers))  # "I"
+
+    header_font  = Font(bold=True, color="FFFFFF")
+    header_fill  = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     center_align = Alignment(horizontal="center", vertical="top", wrap_text=True)
-    top_align = Alignment(vertical="top", wrap_text=True)
+    top_align    = Alignment(vertical="top", wrap_text=True)
 
-    headers = ["TC ID", "티켓 키", "요약", "상태", "우선순위", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과"]
-    col_widths = [10, 14, 28, 12, 10, 28, 28, 45, 35]
-
-    for col, (header, width) in enumerate(zip(headers, col_widths), start=1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_align
-        ws.column_dimensions[cell.column_letter].width = width
-
-    ws.row_dimensions[1].height = 25
-
-    row = 2
     for item in results:
-        for tc in item["test_cases"]:
-            ws.cell(row=row, column=1, value=tc.get("tc_id", "")).alignment = center_align
-            key_cell = ws.cell(row=row, column=2, value=item["key"])
-            key_cell.hyperlink = f"{JIRA_URL}/browse/{item['key']}"
-            key_cell.font = Font(color="0563C1", underline="single")
-            key_cell.alignment = center_align
-            ws.cell(row=row, column=3, value=item["summary"]).alignment = top_align
-            ws.cell(row=row, column=4, value=item["status"]).alignment = center_align
-            ws.cell(row=row, column=5, value=tc.get("우선순위", "")).alignment = center_align
-            ws.cell(row=row, column=6, value=tc.get("테스트항목", "")).alignment = top_align
-            ws.cell(row=row, column=7, value=tc.get("사전조건", "")).alignment = top_align
-            ws.cell(row=row, column=8, value=tc.get("테스트단계", "")).alignment = top_align
-            ws.cell(row=row, column=9, value=tc.get("기대결과", "")).alignment = top_align
-            ws.row_dimensions[row].height = 70
-            row += 1
+        # 시트 이름 = 티켓 제목 (Excel 31자 제한, 특수문자 제거)
+        sheet_title = re.sub(r'[\\/*?:\[\]]', '', item["summary"])[:31]
+        ws = wb.create_sheet(title=sheet_title)
+
+        # 행 1: 티켓 URL 정보 (하이퍼링크)
+        ticket_url = f"{JIRA_URL}/browse/{item['key']}"
+        info_cell = ws.cell(row=1, column=1, value=f"{item['key']}  |  {item['summary']}")
+        info_cell.hyperlink = ticket_url
+        info_cell.font = Font(bold=True, color="0563C1", underline="single", size=11)
+        info_cell.fill = PatternFill(start_color="EBF3FB", end_color="EBF3FB", fill_type="solid")
+        info_cell.alignment = Alignment(horizontal="left", vertical="center")
+        ws.merge_cells(f"A1:{last_col_letter}1")
+        ws.row_dimensions[1].height = 22
+
+        # 행 2: 컬럼 헤더
+        for col, (header, width) in enumerate(zip(headers, col_widths), start=1):
+            cell = ws.cell(row=2, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
+            ws.column_dimensions[cell.column_letter].width = width
+        ws.row_dimensions[2].height = 25
+
+        # 행 3~: TC 데이터
+        last_row = 2 + len(item["test_cases"])
+        for r_idx, tc in enumerate(item["test_cases"], start=3):
+            ws.cell(row=r_idx, column=1, value=tc.get("tc_id", "")).alignment = center_align
+            ws.cell(row=r_idx, column=2, value=tc.get("테스트유형", "")).alignment = center_align
+            ws.cell(row=r_idx, column=3, value=tc.get("테스트항목", "")).alignment = top_align
+            ws.cell(row=r_idx, column=4, value=tc.get("사전조건", "")).alignment = top_align
+            ws.cell(row=r_idx, column=5, value=tc.get("테스트단계", "")).alignment = top_align
+            ws.cell(row=r_idx, column=6, value=tc.get("기대결과", "")).alignment = top_align
+            ws.cell(row=r_idx, column=7, value="").alignment = center_align  # 결과(P/F/N/A)
+            ws.cell(row=r_idx, column=8, value=tc.get("우선순위", "")).alignment = center_align
+            ws.cell(row=r_idx, column=9, value="").alignment = top_align     # 비고
+            ws.row_dimensions[r_idx].height = 70
+
+        # 결과(P/F/N/A) 드롭다운 (G열)
+        dv = DataValidation(type="list", formula1='"P,F,N/A"', allow_blank=True, showDropDown=False)
+        dv.sqref = f"G3:G{last_row}"
+        ws.add_data_validation(dv)
 
     wb.save(output_path)
 
@@ -263,66 +334,103 @@ def read_keys_from_sheets(sheet_id: str) -> list:
 
 
 def save_to_sheets(results: list, sheet_id: str):
-    """생성된 TC를 구글 스프레드시트의 '매뉴얼 TC' 시트에 저장합니다."""
+    """생성된 TC를 구글 스프레드시트에 티켓별 시트로 저장합니다."""
     import gspread
 
     gc = _get_gspread_client()
     sh = gc.open_by_key(sheet_id)
 
-    sheet_title = "매뉴얼 TC"
-    try:
-        ws = sh.worksheet(sheet_title)
-        ws.clear()
-        print(f"  기존 '{sheet_title}' 시트를 초기화했습니다.")
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_title, rows=500, cols=9)
-        print(f"  '{sheet_title}' 시트를 새로 생성했습니다.")
-
-    # 헤더
-    headers = ["티켓 키", "요약", "상태", "우선순위", "TC ID", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과"]
-    rows = [headers]
-
-    for item in results:
-        for tc in item["test_cases"]:
-            rows.append([
-                item["key"],
-                item["summary"],
-                item["status"],
-                tc.get("우선순위", ""),
-                tc.get("tc_id", ""),
-                tc.get("테스트항목", ""),
-                tc.get("사전조건", ""),
-                tc.get("테스트단계", ""),
-                tc.get("기대결과", ""),
-            ])
-
-    ws.update(rows, value_input_option="RAW")
-
-    # 헤더 스타일
-    ws.format("A1:I1", {
-        "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
-        "textFormat": {
-            "bold": True,
-            "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
-        },
-        "horizontalAlignment": "CENTER",
-    })
-
-    # 우선순위 컬럼 색상 (D열)
+    headers = ["TC ID", "테스트유형", "테스트 항목", "사전 조건", "테스트 단계", "기대 결과", "결과", "우선순위", "비고"]
     priority_colors = {
         "High":   {"red": 1.0,  "green": 0.8,  "blue": 0.8},
         "Medium": {"red": 1.0,  "green": 0.95, "blue": 0.8},
         "Low":    {"red": 0.85, "green": 0.92, "blue": 0.85},
     }
-    for i, row in enumerate(rows[1:], start=2):
-        priority = row[3] if len(row) > 3 else ""
-        color = priority_colors.get(priority)
-        if color:
-            ws.format(f"D{i}", {"backgroundColor": color})
+    total_tc = 0
 
-    total_tc = len(rows) - 1
+    for item in results:
+        # 시트 이름 = 티켓 제목 (100자 제한)
+        sheet_title = item["summary"][:100]
+        ticket_url = f"{JIRA_URL}/browse/{item['key']}"
+
+        try:
+            ws = sh.worksheet(sheet_title)
+            ws.clear()
+            print(f"  '{sheet_title}' 시트 초기화")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title=sheet_title, rows=200, cols=len(headers))
+            print(f"  '{sheet_title}' 시트 생성")
+
+        # 행 1: 티켓 URL 정보
+        ws.update([[f"{item['key']}  |  {item['summary']}  |  {ticket_url}"]], "A1")
+        ws.format("A1", {
+            "backgroundColor": {"red": 0.922, "green": 0.953, "blue": 0.984},
+            "textFormat": {"bold": True, "foregroundColor": {"red": 0.02, "green": 0.34, "blue": 0.71}},
+            "horizontalAlignment": "LEFT",
+        })
+        ws.merge_cells(f"A1:{chr(64 + len(headers))}1")
+
+        # 행 2: 컬럼 헤더
+        ws.update([headers], "A2")
+        ws.format(f"A2:{chr(64 + len(headers))}2", {
+            "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+            "horizontalAlignment": "CENTER",
+        })
+
+        # 행 3~: TC 데이터
+        rows_data = []
+        for tc in item["test_cases"]:
+            rows_data.append([
+                tc.get("tc_id", ""),
+                tc.get("테스트유형", ""),
+                tc.get("테스트항목", ""),
+                tc.get("사전조건", ""),
+                tc.get("테스트단계", ""),
+                tc.get("기대결과", ""),
+                "",  # 결과(P/F/N/A)
+                tc.get("우선순위", ""),
+                "",  # 비고
+            ])
+        if rows_data:
+            ws.update(rows_data, "A3")
+            # 우선순위 색상 (H열)
+            for i, tc in enumerate(item["test_cases"]):
+                color = priority_colors.get(tc.get("우선순위", ""))
+                if color:
+                    ws.format(f"H{3 + i}", {"backgroundColor": color})
+
+            # 결과(P/F/N/A) 드롭다운 (G열, 0-indexed: col 6)
+            end_row = 3 + len(rows_data)
+            sh.batch_update({"requests": [{
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": ws.id,
+                        "startRowIndex": 2,
+                        "endRowIndex": end_row,
+                        "startColumnIndex": 6,
+                        "endColumnIndex": 7,
+                    },
+                    "rule": {
+                        "condition": {
+                            "type": "ONE_OF_LIST",
+                            "values": [
+                                {"userEnteredValue": "P"},
+                                {"userEnteredValue": "F"},
+                                {"userEnteredValue": "N/A"},
+                            ],
+                        },
+                        "showCustomUi": True,
+                        "strict": False,
+                    },
+                }
+            }]})
+
+        total_tc += len(item["test_cases"])
+        print(f"  '{sheet_title}' — TC {len(item['test_cases'])}개 저장")
+
     sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
-    print(f"  구글 시트 저장 완료: {total_tc}개 TC → '{sheet_title}' 시트")
+    print(f"\n  총 {total_tc}개 TC 저장 완료")
     print(f"  {sheet_url}")
     return sheet_url
 
@@ -344,11 +452,13 @@ def process_keys(jira: JIRA, groq_client: Groq, issue_keys: list) -> list:
             continue
 
         print(f"  제목: {issue['summary']} | 상태: {issue['status']}")
+        print(f"  요구사항 추론 중...")
+        augmented_spec = augment_ticket_spec(groq_client, issue)
         print(f"  TC 생성 중...")
-        tc_list = generate_test_cases(groq_client, issue)
+        tc_list = generate_test_cases(groq_client, issue, augmented_spec)
         print(f"  생성된 TC: {len(tc_list)}개")
         for tc in tc_list:
-            print(f"    [{tc.get('tc_id')}] [{tc.get('우선순위', '-')}] {tc.get('테스트항목')}")
+            print(f"    [{tc.get('tc_id')}] [{tc.get('테스트유형', '-')}] [{tc.get('우선순위', '-')}] {tc.get('테스트항목')}")
 
         results.append({
             "key": issue["key"],
